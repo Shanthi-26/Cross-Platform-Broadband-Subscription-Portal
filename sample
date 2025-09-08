@@ -1,3 +1,13 @@
+# import os
+# import streamlit as st
+# from pymongo import MongoClient
+# import hashlib
+# import pandas as pd
+# from datetime import datetime
+# import plotly.express as px
+# from bson.objectid import ObjectId
+# import re
+# import random
 import os
 import streamlit as st
 from pymongo import MongoClient
@@ -6,14 +16,105 @@ import pandas as pd
 from datetime import datetime
 import plotly.express as px
 from bson.objectid import ObjectId
+import re
+import random
+import smtplib
+from email.mime.text import MIMEText
+
+# ------------------------- CSS STYLING -------------------------
+def load_css():
+    """Applies custom CSS styles to the Streamlit app."""
+    st.markdown("""
+        <style>
+            /* Import Google Font */
+            @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600&display=swap');
+
+            /* General Styling */
+            html, body, [class*="st-"] {
+                font-family: 'Poppins', sans-serif;
+            }
+
+            .stApp {
+                color: white; /* Make all text white by default */
+            }
+
+            /* --- Main Title --- */
+            h1 {
+                font-weight: 600;
+                text-shadow: 2px 2px 6px rgba(0,0,0,0.4);
+            }
+
+            /* --- Headers --- */
+            h2, h3 {
+                color: #FFFFFF;
+                text-shadow: 1px 1px 4px rgba(0,0,0,0.3);
+            }
+
+            /* --- Glassmorphism Container for Forms & Content --- */
+            .form-container, .content-container {
+                background: rgba(0, 0, 0, 0.25); /* Semi-transparent background */
+                backdrop-filter: blur(12px); /* The blur effect */
+                -webkit-backdrop-filter: blur(12px); /* For Safari */
+                border-radius: 15px;
+                padding: 2rem;
+                border: 1px solid rgba(255, 255, 255, 0.18);
+                box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+            }
+            
+            /* --- Button Styling --- */
+            .stButton > button {
+                background-color: rgba(255, 255, 255, 0.1);
+                color: white;
+                border-radius: 10px;
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                transition: all 0.3s ease;
+                font-weight: 600;
+            }
+            .stButton > button:hover {
+                background-color: rgba(255, 255, 255, 0.3);
+                border: 1px solid white;
+                color: white;
+            }
+            .stButton > button:focus {
+                box-shadow: 0 0 0 2px white;
+            }
+
+            /* --- Input Fields & Text Area Styling --- */
+            .stTextInput input, .stTextArea textarea, .stNumberInput input {
+                background-color: rgba(0, 0, 0, 0.2) !important;
+                color: white !important;
+                border-radius: 10px;
+                border: 1px solid rgba(255, 255, 255, 0.2);
+            }
+            
+            /* --- Success/Info/Warning/Error Boxes --- */
+            .stAlert {
+                background: rgba(0, 0, 0, 0.4);
+                backdrop-filter: blur(5px);
+                border-radius: 10px;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+            }
+
+            /* --- Tabs Styling --- */
+            .stTabs [data-baseweb="tab-list"] {
+                gap: 24px;
+            }
+            .stTabs [data-baseweb="tab"] {
+                height: 50px;
+                background-color: transparent;
+                padding: 0;
+            }
+            .stTabs [data-baseweb="tab"]:hover {
+                background-color: rgba(255, 255, 255, 0.1);
+            }
+            .stTabs [data-baseweb="tab"][aria-selected="true"] {
+                background-color: rgba(255, 255, 255, 0.2);
+            }
+        </style>
+    """, unsafe_allow_html=True)
+
 
 # ------------------------- CONFIG -------------------------
-# Use st.secrets for secure credential management in deployed apps
-# To run locally, create a file .streamlit/secrets.toml
-# And add: MONGO_URI = "your_mongodb_connection_string"
-# ------------------------- CONFIG -------------------------
-# CORRECTED: Using os.getenv for local development.
-# This avoids the st.secrets error on your computer.
 MONGO_URI = os.getenv(
     "MONGO_URI",
     "mongodb+srv://adhiboddeti_db_user:$ureshAdhi123@cluster0.yivqofs.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
@@ -23,13 +124,62 @@ DB_NAME = "docspot"
 USERS_COLL = "users"
 PLANS_COLL = "plans"
 
-# Improvement: Cache the database connection to improve performance
 @st.cache_resource
 def get_db():
     client = MongoClient(MONGO_URI)
     return client[DB_NAME]
 
+
+# ------------------------- CONFIG -------------------------
+# Use st.secrets for secure credential management in deployed apps
+# To run locally, create a file .streamlit/secrets.toml
+# And add: MONGO_URI = "your_mongodb_connection_string"
+# ------------------------- CONFIG -------------------------
+# CORRECTED: Using os.getenv for local development.
+# This avoids the st.secrets error on your computer.
+# MONGO_URI = os.getenv(
+#     "MONGO_URI",
+#     "mongodb+srv://adhiboddeti_db_user:$ureshAdhi123@cluster0.yivqofs.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+# )
+
+# DB_NAME = "docspot"
+# USERS_COLL = "users"
+# PLANS_COLL = "plans"
+
+
+# Improvement: Cache the database connection to improve performance
+# @st.cache_resource
+# def get_db():
+#     client = MongoClient(MONGO_URI)
+#     return client[DB_NAME]
+
 # ------------------------- HELPERS -------------------------
+# Add this to your HELPERS section
+# import re
+# import random
+
+def parse_validity_to_days(validity_str):
+    """
+    Parses a string like '28 days' or '3 months' into an integer number of days.
+    """
+    if not isinstance(validity_str, str):
+        return 30 # Default to 30 days if validity is not a string
+
+    validity_str = validity_str.lower()
+    
+    # Find the number in the string
+    num_match = re.search(r'\d+', validity_str)
+    if not num_match:
+        return 30 # Default if no number is found
+
+    num = int(num_match.group(0))
+
+    if 'month' in validity_str:
+        return num * 30  # Approximate a month as 30 days
+    elif 'day' in validity_str:
+        return num
+    else:
+        return 30 # Default if unit is not recognized
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode('utf-8')).hexdigest()
 
@@ -108,8 +258,35 @@ def add_action(db, phone, action_type, metadata=None):
     }
     users.update_one({'phone': phone}, {'$push': {'actions': entry}})
 
+# def subscribe_package(db, phone, package):
+#     users = db[USERS_COLL]
+#     sub = {
+#         'package_name': package['name'],
+#         'price': float(package['price']),
+#         'speed': package.get('speed'),
+#         'data_gb': package.get('data_gb'),
+#         'subscribed_at': datetime.utcnow(),
+#         'status': 'active'
+#     }
+#     users.update_one({'phone': phone}, {'$push': {'subscriptions': sub}})
+#     add_action(db, phone, 'subscribe', {'package': package['name']})
 def subscribe_package(db, phone, package):
     users = db[USERS_COLL]
+
+    # NEW: Find any existing active plans and set their status to 'cancelled'.
+    # This ensures only one plan is active at a time.
+    users.update_one(
+        {'phone': phone},
+        {
+            '$set': {
+                'subscriptions.$[elem].status': 'cancelled',
+                'subscriptions.$[elem].cancelled_at': datetime.utcnow()
+            }
+        },
+        array_filters=[{'elem.status': 'active'}]
+    )
+
+    # This part remains the same: it adds the new plan as 'active'.
     sub = {
         'package_name': package['name'],
         'price': float(package['price']),
@@ -169,8 +346,24 @@ def upgrade_subscription(db, phone, subscription_index, new_package):
     return True, 'Subscription changed.'
 
 # ------------------------- STREAMLIT UI -------------------------
-st.set_page_config(page_title='Broadband Portal', layout='wide')
+# st.set_page_config(page_title='Broadband Portal', layout='wide')
 
+def set_bg_from_url(url):
+    st.markdown(
+        f"""
+        <style>
+        .stApp {{
+            background-image: url("{url}");
+            background-attachment: fixed;
+            background-size: cover;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+set_bg_from_url("https://images.unsplash.com/photo-1507525428034-b723a9ce6890")
+load_css()
 set_bg_from_url("https://images.unsplash.com/photo-1507525428034-b723a9ce6890")
 
 try:
@@ -737,6 +930,343 @@ elif st.session_state.page == 'Admin Login':
 #         else:
 #             st.info("No actions recorded yet.")
 # ------------------ USER HOME PAGE ------------------
+# elif st.session_state.page == 'Home' and st.session_state.get('user'):
+#     # This section manages the button-based navigation
+#     if 'home_view' not in st.session_state:
+#         st.session_state.home_view = 'browse_plans'  # Default view
+
+#     user = db[USERS_COLL].find_one({"phone": st.session_state['user']['phone']})
+#     subscriptions = user.get("subscriptions", [])
+
+#     st.subheader("Your Broadband Dashboard")
+#     cols = st.columns(6)
+#     with cols[0]:
+#         if st.button("🛍️ Browse Plans", use_container_width=True):
+#             st.session_state.home_view = 'browse_plans'
+#     with cols[1]:
+#         if st.button("📡 Active Plan", use_container_width=True):
+#             st.session_state.home_view = 'active_plan'
+#     with cols[2]:
+#         if st.button("📜 Previous Plans", use_container_width=True):
+#             st.session_state.home_view = 'previous_plans'
+#     with cols[3]:
+#         if st.button("🛒 Your Cart", use_container_width=True):
+#             st.session_state.home_view = 'cart'
+#     with cols[4]:
+#         if st.button("📊 Data Usage", use_container_width=True):
+#             st.session_state.home_view = 'usage'
+#     with cols[5]:
+#         if st.button("📖 Your History", use_container_width=True):
+#             st.session_state.home_view = 'history'
+
+#     st.markdown("---")
+
+#     # This section displays the content based on the button clicked
+    
+#     if st.session_state.home_view == 'browse_plans':
+#         # --- Suggested Packages ---
+#         st.markdown("### 🌟 Suggested Plans for You")
+#         for i, plan in enumerate(SUGGESTED_PACKAGES[:2]):
+#             st.markdown(f"**{plan['name']}** - ₹{plan['price']} - {plan['speed']} - "
+#                         f"{'Unlimited' if plan['data_gb'] is None else str(plan['data_gb']) + ' GB'}")
+#             if plan['name'] in [p['name'] for p in st.session_state.get('cart', [])]:
+#                 st.info("✅ Added to Cart")
+#             else:
+#                 if st.button("Add to Cart", key=f"suggested_cart_{i}"):
+#                     st.session_state['cart'].append(plan)
+#                     st.success(f"{plan['name']} added to cart!")
+#                     st.rerun()
+
+#         st.markdown("---")
+
+#         # --- Admin Created Plans ---
+#         st.markdown("### 📦 All Available Plans")
+        
+#         # Get all plans from the database
+#         plans = list(db[PLANS_COLL].find({}, {"_id": 0}))
+        
+#         if plans:
+#             # **NEW**: Determine the min and max price for the slider from available plans
+#             prices = [plan.get('price', 0) for plan in plans]
+#             min_price = min(prices)
+#             max_price = max(prices)
+
+#             # **NEW**: Create a slider to select the price range
+#             if min_price < max_price:
+#                 selected_price_range = st.slider(
+#                     "Select a price range (₹)",
+#                     min_value=int(min_price),
+#                     max_value=int(max_price),
+#                     value=(int(min_price), int(max_price)) # Default to the full range
+#                 )
+#                 min_selected, max_selected = selected_price_range
+#             else:
+#                 st.info(f"All available plans are priced at ₹{int(min_price)}.")
+#                 min_selected, max_selected = min_price, max_price
+
+#             # **NEW**: Filter plans based on the selected price range
+#             filtered_plans = [
+#                 plan for plan in plans if min_selected <= plan.get('price', 0) <= max_selected
+#             ]
+
+#             if filtered_plans:
+#                 for i, plan in enumerate(filtered_plans):
+#                     st.markdown(f"**{plan['name']}** - ₹{plan['price']} - {plan.get('speed','-')} - "
+#                                 f"{'Unlimited' if plan.get('data_gb') is None else str(plan.get('data_gb')) + ' GB'}")
+#                     if plan['name'] in [p['name'] for p in st.session_state.get('cart', [])]:
+#                         st.info("✅ Added to Cart")
+#                     else:
+#                         if st.button("Add to Cart", key=f"admin_plan_cart_{plan['name']}_{i}"):
+#                             st.session_state['cart'].append(plan)
+#                             st.success(f"{plan['name']} added to cart!")
+#                             st.rerun()
+#             else:
+#                 # Show this message if the slider range excludes all plans
+#                 st.warning("No plans found in the selected price range.")
+#         else:
+#             # Show this message if there are no plans in the database at all
+#             st.info("No admin plans available yet.")
+
+#     elif st.session_state.home_view == 'active_plan':
+#         st.markdown("### Your Current Active Plan")
+#         # (The rest of the logic for other buttons remains the same...)
+#         current_plans = [s for s in subscriptions if s.get("status") == "active"]
+#         if current_plans:
+#             cur = current_plans[-1]
+#             sub_at = cur.get('subscribed_at')
+#             sub_at_str = sub_at.strftime("%Y-%m-%d %H:%M:%S") if isinstance(sub_at, datetime) else str(sub_at)
+#             st.success(f"**{cur['package_name']}** - ₹{cur['price']} - {cur.get('speed','-')} - "
+#                        f"{'Unlimited' if cur['data_gb'] is None else str(cur['data_gb']) + ' GB'} "
+#                        f"(Subscribed on {sub_at_str})")
+#         else:
+#             st.info("You do not have an active plan.")
+
+#     elif st.session_state.home_view == 'previous_plans':
+#         st.markdown("### Your Previous Plans")
+#         prev_plans = [s for s in subscriptions if s.get("status") == "cancelled"]
+#         if prev_plans:
+#             for p in prev_plans[::-1]:
+#                 cancelled_at = p.get('cancelled_at')
+#                 cancelled_at_str = cancelled_at.strftime("%Y-%m-%d %H:%M:%S") if isinstance(cancelled_at, datetime) else str(cancelled_at)
+#                 st.write(f"❌ {p['package_name']} - ₹{p['price']} - {p.get('speed','-')} - "
+#                          f"{'Unlimited' if p['data_gb'] is None else str(p['data_gb']) + ' GB'} "
+#                          f"(Cancelled on {cancelled_at_str})")
+#         else:
+#             st.info("No previous plans found.")
+
+#     elif st.session_state.home_view == 'cart':
+#         st.markdown("### Your Shopping Cart")
+#         if st.session_state.get('cart', []):
+#             for idx, item in enumerate(list(st.session_state['cart'])):
+#                 st.markdown(f"**{item['name']}** - ₹{item['price']} - {item.get('speed','-')} - "
+#                             f"{'Unlimited' if item.get('data_gb') is None else str(item.get('data_gb')) + ' GB'}")
+#                 col1, col2 = st.columns(2)
+#                 with col1:
+#                     if st.button("Buy", key=f"buy_{idx}"):
+#                         subscribe_package(db, user['phone'], item)
+#                         st.success(f"✅ Bought {item['name']} subscription!")
+#                         st.session_state['cart'].remove(item)
+#                         st.rerun()
+#                 with col2:
+#                     if st.button("Cancel", key=f"remove_{idx}"):
+#                         st.session_state['cart'].remove(item)
+#                         st.warning(f"❌ Removed {item['name']} from cart.")
+#                         st.rerun()
+#         else:
+#             st.info("Your cart is empty.")
+
+#     elif st.session_state.home_view == 'usage':
+#         st.markdown("### Your Monthly Data Usage")
+#         usage_history = user.get("usage_history", [])
+#         if usage_history:
+#             df_usage = pd.DataFrame(usage_history)
+#             df_usage['timestamp'] = pd.to_datetime(df_usage['timestamp'])
+#             df_usage['month'] = df_usage['timestamp'].dt.to_period("M").astype(str)
+#             df_monthly = df_usage.groupby('month')['data_mb'].sum().reset_index()
+#         else:
+#             df_monthly = pd.DataFrame({
+#                 "month": ["2025-01", "2025-02", "2025-03", "2025-04", "2025-05", "2025-06"],
+#                 "data_mb": [5000, 7200, 6600, 8000, 9500, 7000]
+#             })
+#         fig = px.bar(
+#             df_monthly, x='month', y='data_mb',
+#             labels={"month": "Month", "data_mb": "Data Used (MB)"},
+#             title="Monthly Data Usage"
+#         )
+#         st.plotly_chart(fig, use_container_width=True)
+
+#     elif st.session_state.home_view == 'history':
+#         st.markdown("### Your Action History")
+#         actions = user.get("actions", [])
+#         if actions:
+#             df_actions = pd.DataFrame(actions)
+#             df_actions['timestamp'] = pd.to_datetime(df_actions['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+#             st.dataframe(df_actions)
+#         else:
+#             st.info("No actions recorded yet.")
+# # ------------------ USER HOME PAGE ------------------
+# elif st.session_state.page == 'Home' and st.session_state.get('user'):
+#     # Initialize a session state variable to manage the view
+#     if 'home_view' not in st.session_state:
+#         st.session_state.home_view = 'browse_plans'  # Default view
+
+#     user = db[USERS_COLL].find_one({"phone": st.session_state['user']['phone']})
+#     subscriptions = user.get("subscriptions", [])
+
+#     # Button-based navigation
+#     st.subheader("Your Broadband Dashboard")
+#     cols = st.columns(6)
+#     with cols[0]:
+#         if st.button("🛍️ Browse Plans", use_container_width=True):
+#             st.session_state.home_view = 'browse_plans'
+#     with cols[1]:
+#         if st.button("📡 Active Plan", use_container_width=True):
+#             st.session_state.home_view = 'active_plan'
+#     with cols[2]:
+#         if st.button("📜 Previous Plans", use_container_width=True):
+#             st.session_state.home_view = 'previous_plans'
+#     with cols[3]:
+#         if st.button("🛒 Your Cart", use_container_width=True):
+#             st.session_state.home_view = 'cart'
+#     with cols[4]:
+#         if st.button("📊 Data Usage", use_container_width=True):
+#             st.session_state.home_view = 'usage'
+#     with cols[5]:
+#         if st.button("📖 Your History", use_container_width=True):
+#             st.session_state.home_view = 'history'
+
+#     st.markdown("---")
+
+#     # Display content based on the button clicked
+#     if st.session_state.home_view == 'browse_plans':
+#         # ... (Your browse plans code remains the same) ...
+#         st.markdown("### 🌟 Suggested Plans for You")
+#         for i, plan in enumerate(SUGGESTED_PACKAGES[:2]):
+#             st.markdown(f"**{plan['name']}** - ₹{plan['price']} - {plan['speed']}")
+#             if plan['name'] in [p['name'] for p in st.session_state.get('cart', [])]:
+#                 st.info("✅ Already in Cart")
+#             else:
+#                 if st.button("Add to Cart", key=f"suggested_cart_{i}"):
+#                     st.session_state['cart'].append(plan)
+#                     st.success(f"{plan['name']} added to cart!")
+#                     st.rerun()
+
+#         st.markdown("---")
+#         st.markdown("### 📦 All Available Plans")
+#         plans = list(db[PLANS_COLL].find({}, {"_id": 0}))
+#         if plans:
+#             selected_price_range = st.slider("Select a price range (₹)", min_value=99, max_value=9999, value=(99, 9999))
+#             min_selected, max_selected = selected_price_range
+#             filtered_plans = [plan for plan in plans if min_selected <= plan.get('price', 0) <= max_selected]
+#             if filtered_plans:
+#                 for i, plan in enumerate(filtered_plans):
+#                     st.markdown(f"**{plan['name']}** - ₹{plan['price']} - {plan.get('speed','-')} - Validity: {plan.get('validity', '-')}")
+#                     st.caption(f"Description: {plan.get('description', 'N/A')}")
+#                     if plan['name'] in [p['name'] for p in st.session_state.get('cart', [])]:
+#                         st.info("✅ Already in Cart")
+#                     else:
+#                         if st.button("Add to Cart", key=f"admin_plan_cart_{plan['name']}_{i}"):
+#                             st.session_state['cart'].append(plan)
+#                             st.success(f"{plan['name']} added to cart!")
+#                             st.rerun()
+#             else:
+#                 st.warning("No plans found in the selected price range.")
+#         else:
+#             st.info("No admin plans available yet.")
+
+#     elif st.session_state.home_view == 'active_plan':
+#         st.markdown("### Your Current Active Plan")
+#         current_plans = [s for s in subscriptions if s.get("status") == "active"]
+#         if current_plans:
+#             cur = current_plans[-1]
+#             sub_at = cur.get('subscribed_at')
+#             sub_at_str = sub_at.strftime("%Y-%m-%d %H:%M:%S") if isinstance(sub_at, datetime) else str(sub_at)
+#             st.success(f"**{cur['package_name']}** - ₹{cur['price']} (Subscribed on {sub_at_str})")
+#         else:
+#             st.info("You do not have an active plan.")
+
+#     elif st.session_state.home_view == 'previous_plans':
+#         st.markdown("### Your Previous Plans")
+#         prev_plans = [s for s in subscriptions if s.get("status") == "cancelled"]
+#         if prev_plans:
+#             for p in prev_plans[::-1]:
+#                 cancelled_at = p.get('cancelled_at')
+#                 cancelled_at_str = cancelled_at.strftime("%Y-%m-%d %H:%M:%S") if isinstance(cancelled_at, datetime) else str(cancelled_at)
+#                 st.write(f"❌ **{p['package_name']}** (Cancelled on {cancelled_at_str})")
+#         else:
+#             st.info("No previous plans found.")
+
+#     elif st.session_state.home_view == 'cart':
+#         st.markdown("### Your Shopping Cart")
+#         if st.session_state.get('cart', []):
+#             for idx, item in enumerate(list(st.session_state['cart'])):
+#                 st.markdown(f"**{item['name']}** - ₹{item['price']}")
+#                 col1, col2 = st.columns(2)
+#                 with col1:
+#                     if st.button("Buy", key=f"buy_{idx}"):
+#                         subscribe_package(db, user['phone'], item)
+#                         st.success(f"✅ Bought {item['name']} subscription!")
+#                         st.session_state['cart'].remove(item)
+#                         st.rerun()
+#                 with col2:
+#                     if st.button("Cancel", key=f"remove_{idx}"):
+#                         st.session_state['cart'].remove(item)
+#                         st.warning(f"❌ Removed {item['name']} from cart.")
+#                         st.rerun()
+#         else:
+#             st.info("Your cart is empty.")
+
+#     # UPDATED: This is the new Daily Data Usage section
+#     elif st.session_state.home_view == 'usage':
+#         st.markdown("### Your Daily Data Usage")
+        
+#         active_plan = next((s for s in subscriptions if s.get("status") == "active"), None)
+        
+#         if active_plan:
+#             plan_details = db[PLANS_COLL].find_one({"name": active_plan['package_name']})
+            
+#             if plan_details:
+#                 validity_days = parse_validity_to_days(plan_details.get('validity'))
+#                 start_date = active_plan.get('subscribed_at').date()
+                
+#                 # Generate date range for the plan's validity
+#                 date_range = pd.to_datetime(pd.date_range(start=start_date, periods=validity_days))
+                
+#                 # Generate random data usage for each day
+#                 # We'll make it look realistic by having some low and high usage days
+#                 daily_usage_mb = [random.randint(150, 1500) for _ in range(validity_days)]
+                
+#                 # Create a DataFrame for plotting
+#                 df_daily_usage = pd.DataFrame({
+#                     "Date": date_range,
+#                     "Data Used (MB)": daily_usage_mb
+#                 })
+                
+#                 st.info(f"Showing simulated daily usage for your **{active_plan['package_name']}** plan for {validity_days} days.")
+
+#                 # Create and display the chart
+#                 fig = px.bar(
+#                     df_daily_usage, 
+#                     x='Date', 
+#                     y='Data Used (MB)',
+#                     title=f"Daily Data Usage for {active_plan['package_name']}"
+#                 )
+#                 st.plotly_chart(fig, use_container_width=True)
+#             else:
+#                 st.error("Could not find details for your active plan.")
+#         else:
+#             st.warning("You do not have an active plan to view data usage.")
+
+#     elif st.session_state.home_view == 'history':
+#         st.markdown("### Your Action History")
+#         actions = user.get("actions", [])
+#         if actions:
+#             df_actions = pd.DataFrame(actions)
+#             df_actions['timestamp'] = pd.to_datetime(df_actions['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+#             st.dataframe(df_actions)
+#         else:
+#             st.info("No actions recorded yet.")
+# ------------------ USER HOME PAGE ------------------
 elif st.session_state.page == 'Home' and st.session_state.get('user'):
     # This section manages the button-based navigation
     if 'home_view' not in st.session_state:
@@ -767,84 +1297,88 @@ elif st.session_state.page == 'Home' and st.session_state.get('user'):
             st.session_state.home_view = 'history'
 
     st.markdown("---")
-
-    # This section displays the content based on the button clicked
     
+    # This section displays the content based on the button clicked
     if st.session_state.home_view == 'browse_plans':
-        # --- Suggested Packages ---
-        st.markdown("### 🌟 Suggested Plans for You")
-        for i, plan in enumerate(SUGGESTED_PACKAGES[:2]):
-            st.markdown(f"**{plan['name']}** - ₹{plan['price']} - {plan['speed']} - "
-                        f"{'Unlimited' if plan['data_gb'] is None else str(plan['data_gb']) + ' GB'}")
-            if plan['name'] in [p['name'] for p in st.session_state.get('cart', [])]:
-                st.info("✅ Added to Cart")
-            else:
-                if st.button("Add to Cart", key=f"suggested_cart_{i}"):
-                    st.session_state['cart'].append(plan)
-                    st.success(f"{plan['name']} added to cart!")
-                    st.rerun()
+        # --- Suggested Plans for You ---
+        st.markdown("### 🌟 Special Offers on Your Previous Plans")
+
+        # UPDATED: Get the user's previously cancelled plans to create suggestions
+        prev_plans = [s for s in subscriptions if s.get("status") == "cancelled"]
+        
+        # Define the possible random OTT offers
+        ott_offers = [
+            "3 months of Hotstar",
+            "3 months of Netflix",
+            "3 months of SonyLiv",
+            "3 months of Amazon Prime Video"
+        ]
+
+        if prev_plans:
+            # We'll suggest a max of 2 of their previous plans
+            for i, plan in enumerate(prev_plans[:2]):
+                # Choose a random offer for this plan suggestion
+                random_offer = random.choice(ott_offers)
+                
+                # Display the plan with the special offer
+                with st.container(border=True):
+                    st.markdown(f"**Reconnect with {plan['package_name']}**")
+                    st.markdown(f"Price: ₹{plan['price']} | Speed: {plan.get('speed','-')}")
+                    st.success(f"**Special Offer:** Get {random_offer} FREE when you re-subscribe!")
+
+                    # Add to cart button logic
+                    if plan['package_name'] in [p['name'] for p in st.session_state.get('cart', [])]:
+                        st.info("✅ Already in Cart")
+                    else:
+                        if st.button("Add to Cart", key=f"suggested_prev_plan_{i}"):
+                            # Fetch the full, original plan details before adding to cart
+                            original_plan_details = db[PLANS_COLL].find_one({"name": plan['package_name']})
+                            if original_plan_details:
+                                 st.session_state['cart'].append(original_plan_details)
+                                 st.success(f"{original_plan_details['name']} added to cart!")
+                                 st.rerun()
+                            else:
+                                st.error("Could not find plan details.")
+        else:
+            st.info("Once you have previous plans, we'll show special offers for them here!")
 
         st.markdown("---")
 
         # --- Admin Created Plans ---
         st.markdown("### 📦 All Available Plans")
         
-        # Get all plans from the database
         plans = list(db[PLANS_COLL].find({}, {"_id": 0}))
         
         if plans:
-            # **NEW**: Determine the min and max price for the slider from available plans
-            prices = [plan.get('price', 0) for plan in plans]
-            min_price = min(prices)
-            max_price = max(prices)
-
-            # **NEW**: Create a slider to select the price range
-            if min_price < max_price:
-                selected_price_range = st.slider(
-                    "Select a price range (₹)",
-                    min_value=int(min_price),
-                    max_value=int(max_price),
-                    value=(int(min_price), int(max_price)) # Default to the full range
-                )
-                min_selected, max_selected = selected_price_range
-            else:
-                st.info(f"All available plans are priced at ₹{int(min_price)}.")
-                min_selected, max_selected = min_price, max_price
-
-            # **NEW**: Filter plans based on the selected price range
-            filtered_plans = [
-                plan for plan in plans if min_selected <= plan.get('price', 0) <= max_selected
-            ]
+            selected_price_range = st.slider("Select a price range (₹)", min_value=99, max_value=9999, value=(99, 9999))
+            min_selected, max_selected = selected_price_range
+            filtered_plans = [plan for plan in plans if min_selected <= plan.get('price', 0) <= max_selected]
 
             if filtered_plans:
                 for i, plan in enumerate(filtered_plans):
-                    st.markdown(f"**{plan['name']}** - ₹{plan['price']} - {plan.get('speed','-')} - "
-                                f"{'Unlimited' if plan.get('data_gb') is None else str(plan.get('data_gb')) + ' GB'}")
+                    st.markdown(f"**{plan['name']}** - ₹{plan['price']} | Speed: {plan.get('speed','-')} | Validity: {plan.get('validity', '-')}")
+                    st.caption(f"Description: {plan.get('description', 'N/A')}")
                     if plan['name'] in [p['name'] for p in st.session_state.get('cart', [])]:
-                        st.info("✅ Added to Cart")
+                        st.info("✅ Already in Cart")
                     else:
                         if st.button("Add to Cart", key=f"admin_plan_cart_{plan['name']}_{i}"):
                             st.session_state['cart'].append(plan)
                             st.success(f"{plan['name']} added to cart!")
                             st.rerun()
             else:
-                # Show this message if the slider range excludes all plans
                 st.warning("No plans found in the selected price range.")
         else:
-            # Show this message if there are no plans in the database at all
             st.info("No admin plans available yet.")
 
+    # (The rest of the elif blocks for other buttons remain the same)
     elif st.session_state.home_view == 'active_plan':
         st.markdown("### Your Current Active Plan")
-        # (The rest of the logic for other buttons remains the same...)
         current_plans = [s for s in subscriptions if s.get("status") == "active"]
         if current_plans:
             cur = current_plans[-1]
             sub_at = cur.get('subscribed_at')
             sub_at_str = sub_at.strftime("%Y-%m-%d %H:%M:%S") if isinstance(sub_at, datetime) else str(sub_at)
-            st.success(f"**{cur['package_name']}** - ₹{cur['price']} - {cur.get('speed','-')} - "
-                       f"{'Unlimited' if cur['data_gb'] is None else str(cur['data_gb']) + ' GB'} "
-                       f"(Subscribed on {sub_at_str})")
+            st.success(f"**{cur['package_name']}** - ₹{cur['price']} (Subscribed on {sub_at_str})")
         else:
             st.info("You do not have an active plan.")
 
@@ -855,9 +1389,7 @@ elif st.session_state.page == 'Home' and st.session_state.get('user'):
             for p in prev_plans[::-1]:
                 cancelled_at = p.get('cancelled_at')
                 cancelled_at_str = cancelled_at.strftime("%Y-%m-%d %H:%M:%S") if isinstance(cancelled_at, datetime) else str(cancelled_at)
-                st.write(f"❌ {p['package_name']} - ₹{p['price']} - {p.get('speed','-')} - "
-                         f"{'Unlimited' if p['data_gb'] is None else str(p['data_gb']) + ' GB'} "
-                         f"(Cancelled on {cancelled_at_str})")
+                st.write(f"❌ **{p['package_name']}** (Cancelled on {cancelled_at_str})")
         else:
             st.info("No previous plans found.")
 
@@ -865,8 +1397,7 @@ elif st.session_state.page == 'Home' and st.session_state.get('user'):
         st.markdown("### Your Shopping Cart")
         if st.session_state.get('cart', []):
             for idx, item in enumerate(list(st.session_state['cart'])):
-                st.markdown(f"**{item['name']}** - ₹{item['price']} - {item.get('speed','-')} - "
-                            f"{'Unlimited' if item.get('data_gb') is None else str(item.get('data_gb')) + ' GB'}")
+                st.markdown(f"**{item['name']}** - ₹{item['price']}")
                 col1, col2 = st.columns(2)
                 with col1:
                     if st.button("Buy", key=f"buy_{idx}"):
@@ -883,24 +1414,23 @@ elif st.session_state.page == 'Home' and st.session_state.get('user'):
             st.info("Your cart is empty.")
 
     elif st.session_state.home_view == 'usage':
-        st.markdown("### Your Monthly Data Usage")
-        usage_history = user.get("usage_history", [])
-        if usage_history:
-            df_usage = pd.DataFrame(usage_history)
-            df_usage['timestamp'] = pd.to_datetime(df_usage['timestamp'])
-            df_usage['month'] = df_usage['timestamp'].dt.to_period("M").astype(str)
-            df_monthly = df_usage.groupby('month')['data_mb'].sum().reset_index()
+        st.markdown("### Your Daily Data Usage")
+        active_plan = next((s for s in subscriptions if s.get("status") == "active"), None)
+        if active_plan:
+            plan_details = db[PLANS_COLL].find_one({"name": active_plan['package_name']})
+            if plan_details:
+                validity_days = parse_validity_to_days(plan_details.get('validity'))
+                start_date = active_plan.get('subscribed_at').date()
+                date_range = pd.to_datetime(pd.date_range(start=start_date, periods=validity_days))
+                daily_usage_mb = [random.randint(150, 1500) for _ in range(validity_days)]
+                df_daily_usage = pd.DataFrame({"Date": date_range, "Data Used (MB)": daily_usage_mb})
+                st.info(f"Showing simulated daily usage for your **{active_plan['package_name']}** plan for {validity_days} days.")
+                fig = px.bar(df_daily_usage, x='Date', y='Data Used (MB)', title=f"Daily Data Usage for {active_plan['package_name']}")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.error("Could not find details for your active plan.")
         else:
-            df_monthly = pd.DataFrame({
-                "month": ["2025-01", "2025-02", "2025-03", "2025-04", "2025-05", "2025-06"],
-                "data_mb": [5000, 7200, 6600, 8000, 9500, 7000]
-            })
-        fig = px.bar(
-            df_monthly, x='month', y='data_mb',
-            labels={"month": "Month", "data_mb": "Data Used (MB)"},
-            title="Monthly Data Usage"
-        )
-        st.plotly_chart(fig, use_container_width=True)
+            st.warning("You do not have an active plan to view data usage.")
 
     elif st.session_state.home_view == 'history':
         st.markdown("### Your Action History")
