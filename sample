@@ -1,0 +1,1283 @@
+import os
+import streamlit as st
+from pymongo import MongoClient
+import hashlib
+import pandas as pd
+from datetime import datetime
+import plotly.express as px
+from bson.objectid import ObjectId
+
+# ------------------------- CONFIG -------------------------
+# Use st.secrets for secure credential management in deployed apps
+# To run locally, create a file .streamlit/secrets.toml
+# And add: MONGO_URI = "your_mongodb_connection_string"
+# ------------------------- CONFIG -------------------------
+# CORRECTED: Using os.getenv for local development.
+# This avoids the st.secrets error on your computer.
+MONGO_URI = os.getenv(
+    "MONGO_URI",
+    "mongodb+srv://adhiboddeti_db_user:$ureshAdhi123@cluster0.yivqofs.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+)
+
+DB_NAME = "docspot"
+USERS_COLL = "users"
+PLANS_COLL = "plans"
+
+# Improvement: Cache the database connection to improve performance
+@st.cache_resource
+def get_db():
+    client = MongoClient(MONGO_URI)
+    return client[DB_NAME]
+
+# ------------------------- HELPERS -------------------------
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode('utf-8')).hexdigest()
+
+def verify_password(plain_password, hashed_password):
+    return hash_password(plain_password) == hashed_password
+
+PREDEFINED_ADMIN = {
+    'full_name': 'Administrator',
+    'phone': 'admin',
+    'password': 'admin123'
+}
+
+SUGGESTED_PACKAGES = [
+    {'name': 'Basic 50GB', 'price': 199, 'speed': '20 Mbps', 'data_gb': 50},
+    {'name': 'Standard 150GB', 'price': 399, 'speed': '100 Mbps', 'data_gb': 150},
+    {'name': 'Unlimited Lite', 'price': 699, 'speed': '200 Mbps', 'data_gb': None},
+]
+
+def set_bg_from_url(url):
+    st.markdown(
+        f"""
+        <style>
+        .stApp {{
+            background-image: url("{url}");
+            background-attachment: fixed;
+            background-size: cover;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+def create_admin_if_missing(db):
+    users = db[USERS_COLL]
+    if users.find_one({'phone': PREDEFINED_ADMIN['phone']}) is None:
+        users.insert_one({
+            'full_name': PREDEFINED_ADMIN['full_name'],
+            'phone': PREDEFINED_ADMIN['phone'],
+            'password_hash': hash_password(PREDEFINED_ADMIN['password']),
+            'role': 'admin',
+            'subscriptions': [],
+            'usage_history': [],
+            'actions': []
+        })
+
+def register_user(db, full_name, phone, password):
+    users = db[USERS_COLL]
+    if users.find_one({'phone': phone}):
+        return False, 'Phone number already registered.'
+    users.insert_one({
+        'full_name': full_name,
+        'phone': phone,
+        'password_hash': hash_password(password),
+        'role': 'user',
+        'subscriptions': [],
+        'usage_history': [],
+        'actions': []
+    })
+    return True, 'Registration successful.'
+
+def authenticate(db, phone, password):
+    users = db[USERS_COLL]
+    u = users.find_one({'phone': phone})
+    if not u:
+        return False, 'User not found.'
+    if not verify_password(password, u.get('password_hash')):
+        return False, 'Incorrect password.'
+    return True, u
+
+def add_action(db, phone, action_type, metadata=None):
+    users = db[USERS_COLL]
+    entry = {
+        'timestamp': datetime.utcnow(),
+        'action': action_type,
+        'metadata': metadata or {}
+    }
+    users.update_one({'phone': phone}, {'$push': {'actions': entry}})
+
+def subscribe_package(db, phone, package):
+    users = db[USERS_COLL]
+    sub = {
+        'package_name': package['name'],
+        'price': float(package['price']),
+        'speed': package.get('speed'),
+        'data_gb': package.get('data_gb'),
+        'subscribed_at': datetime.utcnow(),
+        'status': 'active'
+    }
+    users.update_one({'phone': phone}, {'$push': {'subscriptions': sub}})
+    add_action(db, phone, 'subscribe', {'package': package['name']})
+
+def cancel_subscription(db, phone, subscription_index=0):
+    users = db[USERS_COLL]
+    u = users.find_one({'phone': phone})
+    if not u or not u.get('subscriptions'):
+        return False, 'No subscriptions to cancel.'
+    subs = u['subscriptions']
+    if subscription_index < 0 or subscription_index >= len(subs):
+        return False, 'Invalid subscription selected.'
+    subs[subscription_index]['status'] = 'cancelled'
+    subs[subscription_index]['cancelled_at'] = datetime.utcnow()
+    users.update_one({'phone': phone}, {'$set': {'subscriptions': subs}})
+    add_action(db, phone, 'cancel', {'package': subs[subscription_index]['package_name']})
+    return True, 'Subscription cancelled.'
+
+def renew_subscription(db, phone, subscription_index=0):
+    users = db[USERS_COLL]
+    u = users.find_one({'phone': phone})
+    if not u or not u.get('subscriptions'):
+        return False, 'No subscriptions to renew.'
+    subs = u['subscriptions']
+    if subscription_index < 0 or subscription_index >= len(subs):
+        return False, 'Invalid subscription selected.'
+    subs[subscription_index]['status'] = 'active'
+    subs[subscription_index]['renewed_at'] = datetime.utcnow()
+    users.update_one({'phone': phone}, {'$set': {'subscriptions': subs}})
+    add_action(db, phone, 'renew', {'package': subs[subscription_index]['package_name']})
+    return True, 'Subscription renewed.'
+
+def upgrade_subscription(db, phone, subscription_index, new_package):
+    users = db[USERS_COLL]
+    u = users.find_one({'phone': phone})
+    if not u or not u.get('subscriptions'):
+        return False, 'No subscriptions to upgrade/downgrade.'
+    subs = u['subscriptions']
+    if subscription_index < 0 or subscription_index >= len(subs):
+        return False, 'Invalid subscription selected.'
+    subs[subscription_index].update({
+        'package_name': new_package['name'],
+        'price': float(new_package['price']),
+        'speed': new_package.get('speed'),
+        'data_gb': new_package.get('data_gb'),
+        'upgraded_at': datetime.utcnow(),
+    })
+    users.update_one({'phone': phone}, {'$set': {'subscriptions': subs}})
+    add_action(db, phone, 'change_plan', {'package': new_package['name']})
+    return True, 'Subscription changed.'
+
+# ------------------------- STREAMLIT UI -------------------------
+st.set_page_config(page_title='Broadband Portal', layout='wide')
+
+set_bg_from_url("https://images.unsplash.com/photo-1507525428034-b723a9ce6890")
+
+try:
+    db = get_db()
+    create_admin_if_missing(db)
+except Exception as e:
+    st.error('Could not connect to MongoDB. Check your connection string.\n' + str(e))
+    st.stop()
+
+if 'user' not in st.session_state:
+    st.session_state['user'] = None
+if 'role' not in st.session_state:
+    st.session_state['role'] = None
+if 'page' not in st.session_state:
+    st.session_state['page'] = 'Login'
+if 'cart' not in st.session_state:
+    st.session_state['cart'] = []
+
+st.title('Broadband Portal')
+
+if not st.session_state['user']:
+    nav_cols = st.columns(3)
+    with nav_cols[0]:
+        if st.button('Login', use_container_width=True, key='nav_login'):
+            st.session_state.page = 'Login'
+            st.rerun()
+    with nav_cols[1]:
+        if st.button('Register', use_container_width=True, key='nav_register'):
+            st.session_state.page = 'Register'
+            st.rerun()
+    with nav_cols[2]:
+        if st.button('Admin Login', use_container_width=True, key='nav_admin_login'):
+            st.session_state.page = 'Admin Login'
+            st.rerun()
+else:
+    nav_cols = st.columns([4, 1])
+    with nav_cols[0]:
+        page_title = "Admin Panel" if st.session_state.role == 'admin' else "Home"
+        st.subheader(f"👋 Welcome, {st.session_state.user['full_name']} | Page: {page_title}")
+    with nav_cols[1]:
+        if st.button('Logout', use_container_width=True):
+            st.session_state.clear()
+            st.session_state['page'] = 'Login'
+            st.rerun()
+
+st.markdown("---")
+
+# ------------------------- PAGES -------------------------
+
+if st.session_state.page == 'Register':
+    with st.container(border=True):
+        st.header('📝 Create a New Account')
+        with st.form(key='registration_form', clear_on_submit=True):
+            col1, col2 = st.columns([1, 2])
+            with col1:
+                st.image("https://cdn-icons-png.flaticon.com/512/5087/5087579.png", use_container_width=True)
+            with col2:
+                full_name = st.text_input('Full Name', placeholder='Enter your full name')
+                phone = st.text_input('Phone Number', placeholder='Enter your 10-digit phone number')
+                password = st.text_input('Password', type='password', placeholder='Choose a strong password')
+                confirm_password = st.text_input('Confirm Password', type='password', placeholder='Re-enter your password')
+            submitted = st.form_submit_button('Register', use_container_width=True)
+            if submitted:
+                if not all([full_name, phone, password, confirm_password]):
+                    st.error("⚠️ All fields are required.")
+                elif password != confirm_password:
+                    st.error("❌ Passwords do not match!")
+                elif len(phone) != 10 or not phone.isdigit():
+                    st.error("📞 Please enter a valid 10-digit phone number.")
+                else:
+                    ok, msg = register_user(db, full_name.strip(), phone.strip(), password)
+                    if ok:
+                        st.success(msg + ' You can now login.')
+                        st.session_state.page = 'Login'
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
+# elif st.session_state.page == 'Login':
+#     with st.container(border=True):
+#         st.header('🔑 User Login')
+#         with st.form(key='login_form'):
+#             col1, col2 = st.columns([1, 2])
+#             with col1:
+#                 st.image("https://cdn-icons-png.flaticon.com/512/5087/5087572.png", use_container_width=True)
+#             with col2:
+#                 phone = st.text_input('Phone number', placeholder="Enter your phone number")
+#                 password = st.text_input('Password', type='password', placeholder="Enter your password")
+#             submitted = st.form_submit_button('Login', use_container_width=True)
+#             if submitted:
+#                 ok, res = authenticate(db, phone.strip(), password)
+#                 if ok and res.get('role') == 'user':
+#                     st.session_state['user'] = res
+#                     st.session_state['role'] = 'user'
+#                     st.session_state['page'] = 'Home'
+#                     st.rerun()
+#                 else:
+#                     st.error(res)
+elif st.session_state.page == 'Login':
+    with st.container(border=True):
+        st.header('🔑 User Login')
+        with st.form(key='login_form'):
+            col1, col2 = st.columns([1, 2])
+            with col1:
+                # UPDATED: The logo URL has been changed
+                st.image("https://cdn3.vectorstock.com/i/1000x1000/66/77/login-button-click-app-icon-vector-28806677.jpg", use_container_width=True)
+            with col2:
+                phone = st.text_input('Phone number', placeholder="Enter your phone number")
+                password = st.text_input('Password', type='password', placeholder="Enter your password")
+            submitted = st.form_submit_button('Login', use_container_width=True)
+            if submitted:
+                ok, res = authenticate(db, phone.strip(), password)
+                if ok and res.get('role') == 'user':
+                    st.session_state['user'] = res
+                    st.session_state['role'] = 'user'
+                    st.session_state['page'] = 'Home'
+                    st.rerun()
+                else:
+                    st.error(res)
+
+elif st.session_state.page == 'Admin Login':
+    with st.container(border=True):
+        st.header('🛠️ Admin Login')
+        with st.form(key='admin_login_form'):
+            col1, col2 = st.columns([1, 2])
+            with col1:
+                st.image("https://cdn-icons-png.flaticon.com/512/1828/1828465.png", use_container_width=True)
+            with col2:
+                phone = st.text_input('Admin Username', placeholder="Enter admin username")
+                password = st.text_input('Password', type='password', placeholder="Enter admin password")
+            submitted = st.form_submit_button('Login as Admin', use_container_width=True)
+            if submitted:
+                ok, res = authenticate(db, phone.strip(), password)
+                if ok and res.get('role') == 'admin':
+                    st.session_state['user'] = res
+                    st.session_state['role'] = 'admin'
+                    st.session_state['page'] = 'Admin Panel'
+                    st.rerun()
+                else:
+                    st.error('Invalid admin credentials.')
+
+# elif st.session_state.page == 'Home' and st.session_state.get('user'):
+#     user = db[USERS_COLL].find_one({"phone": st.session_state['user']['phone']})
+#     subscriptions = user.get("subscriptions", [])
+
+#     st.markdown("### 📡 Current Plan")
+#     current_plans = [s for s in subscriptions if s.get("status") == "active"]
+#     if current_plans:
+#         cur = current_plans[-1]
+#         sub_at = cur.get('subscribed_at')
+#         sub_at_str = sub_at.strftime("%Y-%m-%d %H:%M:%S") if isinstance(sub_at, datetime) else str(sub_at)
+#         st.success(f"**{cur['package_name']}** - ₹{cur['price']} - {cur.get('speed','-')} - "
+#                    f"{'Unlimited' if cur['data_gb'] is None else str(cur['data_gb']) + ' GB'} "
+#                    f"(Subscribed on {sub_at_str})")
+#     else:
+#         st.info("No active plan right now. Buy a subscription from below.")
+
+#     st.markdown("---")
+#     st.markdown("### 📜 Previous Plans")
+#     prev_plans = [s for s in subscriptions if s.get("status") == "cancelled"]
+#     if prev_plans:
+#         for p in prev_plans[::-1]:
+#             cancelled_at = p.get('cancelled_at')
+#             cancelled_at_str = cancelled_at.strftime("%Y-%m-%d %H:%M:%S") if isinstance(cancelled_at, datetime) else str(cancelled_at)
+#             st.write(f"❌ {p['package_name']} - ₹{p['price']} - {p.get('speed','-')} - "
+#                      f"{'Unlimited' if p['data_gb'] is None else str(p['data_gb']) + ' GB'} "
+#                      f"(Cancelled on {cancelled_at_str})")
+#     else:
+#         st.info("No previous plans found.")
+
+#     st.markdown("---")
+#     st.markdown("### 🌟 Suggested Plans for You")
+#     for i, plan in enumerate(SUGGESTED_PACKAGES[:2]):
+#         st.markdown(f"**{plan['name']}** - ₹{plan['price']} - {plan['speed']} - "
+#                     f"{'Unlimited' if plan['data_gb'] is None else str(plan['data_gb']) + ' GB'}")
+#         if plan['name'] in [p['name'] for p in st.session_state.get('cart', [])]:
+#             st.info("✅ Already in Cart")
+#         else:
+#             if st.button("Add to Cart", key=f"suggested_cart_{i}"):
+#                 st.session_state['cart'].append(plan)
+#                 st.success(f"{plan['name']} added to cart!")
+#                 st.rerun()
+
+#     st.markdown("---")
+#     st.markdown("### 📦 All Available Plans")
+#     search_query = st.text_input("🔍 Search for a Plan by name", key="plan_search")
+#     plans = list(db[PLANS_COLL].find({}, {"_id": 0}))
+
+#     if search_query:
+#         search_query_lower = search_query.lower()
+#         filtered_plans = [plan for plan in plans if search_query_lower in plan['name'].lower()]
+#     else:
+#         filtered_plans = plans
+
+#     if filtered_plans:
+#         for i, plan in enumerate(filtered_plans):
+#             st.markdown(f"**{plan['name']}** - ₹{plan['price']} - {plan.get('speed','-')} - "
+#                         f"{'Unlimited' if plan.get('data_gb') is None else str(plan.get('data_gb')) + ' GB'}")
+#             if plan['name'] in [p['name'] for p in st.session_state.get('cart', [])]:
+#                 st.info("✅ Already in Cart")
+#             else:
+#                 if st.button("Add to Cart", key=f"admin_plan_cart_{plan['name']}_{i}"):
+#                     st.session_state['cart'].append(plan)
+#                     st.success(f"{plan['name']} added to cart!")
+#                     st.rerun()
+#     else:
+#         if search_query:
+#             st.warning(f"No plans found matching '{search_query}'.")
+#         else:
+#             st.info("No admin plans available yet.")
+
+#     st.markdown("---")
+#     st.markdown("### 🛒 Your Cart")
+#     if st.session_state.get('cart', []):
+#         for idx, item in enumerate(list(st.session_state['cart'])):
+#             st.markdown(f"**{item['name']}** - ₹{item['price']} - {item.get('speed','-')} - "
+#                         f"{'Unlimited' if item.get('data_gb') is None else str(item.get('data_gb')) + ' GB'}")
+#             col1, col2 = st.columns(2)
+#             with col1:
+#                 if st.button("Buy", key=f"buy_{idx}"):
+#                     subscribe_package(db, user['phone'], item)
+#                     st.success(f"✅ Bought {item['name']} subscription!")
+#                     st.session_state['cart'].remove(item)
+#                     st.rerun()
+#             with col2:
+#                 if st.button("Cancel", key=f"remove_{idx}"):
+#                     st.session_state['cart'].remove(item)
+#                     st.warning(f"❌ Removed {item['name']} from cart.")
+#                     st.rerun()
+#     else:
+#         st.info("Cart is empty.")
+
+#     st.markdown("---")
+#     st.markdown("### 📊 Monthly Data Usage")
+#     usage_history = user.get("usage_history", [])
+#     if usage_history:
+#         df_usage = pd.DataFrame(usage_history)
+#         df_usage['timestamp'] = pd.to_datetime(df_usage['timestamp'])
+#         df_usage['month'] = df_usage['timestamp'].dt.to_period("M").astype(str)
+#         df_monthly = df_usage.groupby('month')['data_mb'].sum().reset_index()
+#     else:
+#         df_monthly = pd.DataFrame({
+#             "month": ["2025-01", "2025-02", "2025-03", "2025-04", "2025-05", "2025-06"],
+#             "data_mb": [5000, 7200, 6600, 8000, 9500, 7000]
+#         })
+#     fig = px.bar(
+#         df_monthly, x='month', y='data_mb',
+#         labels={"month": "Month", "data_mb": "Data Used (MB)"},
+#         title="Monthly Data Usage"
+#     )
+#     st.plotly_chart(fig, use_container_width=True)
+
+#     st.markdown("---")
+#     st.markdown("### 📜 Your History")
+#     actions = user.get("actions", [])
+#     if actions:
+#         df_actions = pd.DataFrame(actions)
+#         df_actions['timestamp'] = pd.to_datetime(df_actions['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+#         st.dataframe(df_actions)
+#     else:
+#         st.info("No actions recorded yet.")
+# ------------------ USER HOME PAGE ------------------
+# elif st.session_state.page == 'Home' and st.session_state.get('user'):
+#     # NEW: Initialize a session state variable to manage the view
+#     if 'home_view' not in st.session_state:
+#         st.session_state.home_view = 'browse_plans'  # Default view
+
+#     user = db[USERS_COLL].find_one({"phone": st.session_state['user']['phone']})
+#     subscriptions = user.get("subscriptions", [])
+
+#     # NEW: Create side-by-side buttons to switch views
+#     st.subheader("Your Broadband Dashboard")
+#     cols = st.columns(3)
+#     with cols[0]:
+#         if st.button("📡 Active Plan", use_container_width=True):
+#             st.session_state.home_view = 'active_plan'
+#     with cols[1]:
+#         if st.button("📜 Previous Plans", use_container_width=True):
+#             st.session_state.home_view = 'previous_plans'
+#     with cols[2]:
+#         if st.button("🛍️ Browse All Plans", use_container_width=True):
+#             st.session_state.home_view = 'browse_plans'
+
+#     st.markdown("---")
+
+#     # NEW: Conditionally display content based on the button clicked
+#     if st.session_state.home_view == 'active_plan':
+#         st.markdown("### Your Current Plan")
+#         current_plans = [s for s in subscriptions if s.get("status") == "active"]
+#         if current_plans:
+#             cur = current_plans[-1]
+#             sub_at = cur.get('subscribed_at')
+#             sub_at_str = sub_at.strftime("%Y-%m-%d %H:%M:%S") if isinstance(sub_at, datetime) else str(sub_at)
+#             st.success(f"**{cur['package_name']}** - ₹{cur['price']} - {cur.get('speed','-')} - "
+#                        f"{'Unlimited' if cur['data_gb'] is None else str(cur['data_gb']) + ' GB'} "
+#                        f"(Subscribed on {sub_at_str})")
+#         else:
+#             st.info("You do not have an active plan.")
+
+#     elif st.session_state.home_view == 'previous_plans':
+#         st.markdown("### Your Previous Plans")
+#         prev_plans = [s for s in subscriptions if s.get("status") == "cancelled"]
+#         if prev_plans:
+#             for p in prev_plans[::-1]:
+#                 cancelled_at = p.get('cancelled_at')
+#                 cancelled_at_str = cancelled_at.strftime("%Y-%m-%d %H:%M:%S") if isinstance(cancelled_at, datetime) else str(cancelled_at)
+#                 st.write(f"❌ {p['package_name']} - ₹{p['price']} - {p.get('speed','-')} - "
+#                          f"{'Unlimited' if p['data_gb'] is None else str(p['data_gb']) + ' GB'} "
+#                          f"(Cancelled on {cancelled_at_str})")
+#         else:
+#             st.info("No previous plans found.")
+
+#     elif st.session_state.home_view == 'browse_plans':
+#         # --- Suggested Packages ---
+#         st.markdown("### 🌟 Suggested Plans for You")
+#         for i, plan in enumerate(SUGGESTED_PACKAGES[:2]):
+#             st.markdown(f"**{plan['name']}** - ₹{plan['price']} - {plan['speed']} - "
+#                         f"{'Unlimited' if plan['data_gb'] is None else str(plan['data_gb']) + ' GB'}")
+#             if plan['name'] in [p['name'] for p in st.session_state.get('cart', [])]:
+#                 st.info("✅ Already in Cart")
+#             else:
+#                 if st.button("Add to Cart", key=f"suggested_cart_{i}"):
+#                     st.session_state['cart'].append(plan)
+#                     st.success(f"{plan['name']} added to cart!")
+#                     st.rerun()
+
+#         st.markdown("---")
+
+#         # --- Admin Created Plans ---
+#         st.markdown("### 📦 All Available Plans")
+#         search_query = st.text_input("🔍 Search for a Plan by name", key="plan_search")
+#         plans = list(db[PLANS_COLL].find({}, {"_id": 0}))
+
+#         if search_query:
+#             search_query_lower = search_query.lower()
+#             filtered_plans = [plan for plan in plans if search_query_lower in plan['name'].lower()]
+#         else:
+#             filtered_plans = plans
+
+#         if filtered_plans:
+#             for i, plan in enumerate(filtered_plans):
+#                 st.markdown(f"**{plan['name']}** - ₹{plan['price']} - {plan.get('speed','-')} - "
+#                             f"{'Unlimited' if plan.get('data_gb') is None else str(plan.get('data_gb')) + ' GB'}")
+#                 if plan['name'] in [p['name'] for p in st.session_state.get('cart', [])]:
+#                     st.info("✅ Already in Cart")
+#                 else:
+#                     if st.button("Add to Cart", key=f"admin_plan_cart_{plan['name']}_{i}"):
+#                         st.session_state['cart'].append(plan)
+#                         st.success(f"{plan['name']} added to cart!")
+#                         st.rerun()
+#         else:
+#             if search_query:
+#                 st.warning(f"No plans found matching '{search_query}'.")
+#             else:
+#                 st.info("No admin plans available yet.")
+
+#     # --- These sections will always be visible at the bottom ---
+#     st.markdown("---")
+#     st.markdown("### 🛒 Your Cart")
+#     if st.session_state.get('cart', []):
+#         for idx, item in enumerate(list(st.session_state['cart'])):
+#             st.markdown(f"**{item['name']}** - ₹{item['price']} - {item.get('speed','-')} - "
+#                         f"{'Unlimited' if item.get('data_gb') is None else str(item.get('data_gb')) + ' GB'}")
+#             col1, col2 = st.columns(2)
+#             with col1:
+#                 if st.button("Buy", key=f"buy_{idx}"):
+#                     subscribe_package(db, user['phone'], item)
+#                     st.success(f"✅ Bought {item['name']} subscription!")
+#                     st.session_state['cart'].remove(item)
+#                     st.rerun()
+#             with col2:
+#                 if st.button("Cancel", key=f"remove_{idx}"):
+#                     st.session_state['cart'].remove(item)
+#                     st.warning(f"❌ Removed {item['name']} from cart.")
+#                     st.rerun()
+#     else:
+#         st.info("Cart is empty.")
+
+#     st.markdown("---")
+#     st.markdown("### 📊 Monthly Data Usage")
+#     usage_history = user.get("usage_history", [])
+#     if usage_history:
+#         df_usage = pd.DataFrame(usage_history)
+#         df_usage['timestamp'] = pd.to_datetime(df_usage['timestamp'])
+#         df_usage['month'] = df_usage['timestamp'].dt.to_period("M").astype(str)
+#         df_monthly = df_usage.groupby('month')['data_mb'].sum().reset_index()
+#     else:
+#         df_monthly = pd.DataFrame({
+#             "month": ["2025-01", "2025-02", "2025-03", "2025-04", "2025-05", "2025-06"],
+#             "data_mb": [5000, 7200, 6600, 8000, 9500, 7000]
+#         })
+#     fig = px.bar(
+#         df_monthly, x='month', y='data_mb',
+#         labels={"month": "Month", "data_mb": "Data Used (MB)"},
+#         title="Monthly Data Usage"
+#     )
+#     st.plotly_chart(fig, use_container_width=True)
+
+#     st.markdown("---")
+#     st.markdown("### 📜 Your History")
+#     actions = user.get("actions", [])
+#     if actions:
+#         df_actions = pd.DataFrame(actions)
+#         df_actions['timestamp'] = pd.to_datetime(df_actions['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+#         st.dataframe(df_actions)
+#     else:
+#         st.info("No actions recorded yet.")
+# ------------------ USER HOME PAGE ------------------
+# elif st.session_state.page == 'Home' and st.session_state.get('user'):
+#     # Initialize a session state variable to manage the view
+#     if 'home_view' not in st.session_state:
+#         st.session_state.home_view = 'browse_plans'  # Default view
+
+#     user = db[USERS_COLL].find_one({"phone": st.session_state['user']['phone']})
+#     subscriptions = user.get("subscriptions", [])
+
+#     # UPDATED: Create a row of 6 buttons for all sections
+#     st.subheader("Your Broadband Dashboard")
+#     cols = st.columns(6)
+#     with cols[0]:
+#         if st.button("🛍️ Browse Plans", use_container_width=True):
+#             st.session_state.home_view = 'browse_plans'
+#     with cols[1]:
+#         if st.button("📡 Active Plan", use_container_width=True):
+#             st.session_state.home_view = 'active_plan'
+#     with cols[2]:
+#         if st.button("📜 Previous Plans", use_container_width=True):
+#             st.session_state.home_view = 'previous_plans'
+#     with cols[3]:
+#         if st.button("🛒 Your Cart", use_container_width=True):
+#             st.session_state.home_view = 'cart'
+#     with cols[4]:
+#         if st.button("📊 Data Usage", use_container_width=True):
+#             st.session_state.home_view = 'usage'
+#     with cols[5]:
+#         if st.button("📖 Your History", use_container_width=True):
+#             st.session_state.home_view = 'history'
+
+#     st.markdown("---")
+
+#     # UPDATED: The entire page content is now conditional based on the button clicked
+    
+#     if st.session_state.home_view == 'browse_plans':
+#         # --- Suggested Packages ---
+#         st.markdown("### 🌟 Suggested Plans for You")
+#         for i, plan in enumerate(SUGGESTED_PACKAGES[:2]):
+#             st.markdown(f"**{plan['name']}** - ₹{plan['price']} - {plan['speed']} - "
+#                         f"{'Unlimited' if plan['data_gb'] is None else str(plan['data_gb']) + ' GB'}")
+#             if plan['name'] in [p['name'] for p in st.session_state.get('cart', [])]:
+#                 st.info("✅ Added to Cart")
+#             else:
+#                 if st.button("Add to Cart", key=f"suggested_cart_{i}"):
+#                     st.session_state['cart'].append(plan)
+#                     st.success(f"{plan['name']} added to cart!")
+#                     st.rerun()
+
+#         st.markdown("---")
+
+#         # --- Admin Created Plans ---
+#         st.markdown("### 📦 All Available Plans")
+#         search_query = st.text_input("🔍 Search for a Plan by name", key="plan_search")
+#         plans = list(db[PLANS_COLL].find({}, {"_id": 0}))
+
+#         if search_query:
+#             search_query_lower = search_query.lower()
+#             filtered_plans = [plan for plan in plans if search_query_lower in plan['name'].lower()]
+#         else:
+#             filtered_plans = plans
+
+#         if filtered_plans:
+#             for i, plan in enumerate(filtered_plans):
+#                 st.markdown(f"**{plan['name']}** - ₹{plan['price']} - {plan.get('speed','-')} - "
+#                             f"{'Unlimited' if plan.get('data_gb') is None else str(plan.get('data_gb')) + ' GB'}")
+#                 if plan['name'] in [p['name'] for p in st.session_state.get('cart', [])]:
+#                     st.info("✅ Added to Cart")
+#                 else:
+#                     if st.button("Add to Cart", key=f"admin_plan_cart_{plan['name']}_{i}"):
+#                         st.session_state['cart'].append(plan)
+#                         st.success(f"{plan['name']} added to cart!")
+#                         st.rerun()
+#         else:
+#             if search_query:
+#                 st.warning(f"No plans found matching '{search_query}'.")
+#             else:
+#                 st.info("No admin plans available yet.")
+
+#     elif st.session_state.home_view == 'active_plan':
+#         st.markdown("### Your Current Active Plan")
+#         current_plans = [s for s in subscriptions if s.get("status") == "active"]
+#         if current_plans:
+#             cur = current_plans[-1]
+#             sub_at = cur.get('subscribed_at')
+#             sub_at_str = sub_at.strftime("%Y-%m-%d %H:%M:%S") if isinstance(sub_at, datetime) else str(sub_at)
+#             st.success(f"**{cur['package_name']}** - ₹{cur['price']} - {cur.get('speed','-')} - "
+#                        f"{'Unlimited' if cur['data_gb'] is None else str(cur['data_gb']) + ' GB'} "
+#                        f"(Subscribed on {sub_at_str})")
+#         else:
+#             st.info("You do not have an active plan.")
+
+#     elif st.session_state.home_view == 'previous_plans':
+#         st.markdown("### Your Previous Plans")
+#         prev_plans = [s for s in subscriptions if s.get("status") == "cancelled"]
+#         if prev_plans:
+#             for p in prev_plans[::-1]:
+#                 cancelled_at = p.get('cancelled_at')
+#                 cancelled_at_str = cancelled_at.strftime("%Y-%m-%d %H:%M:%S") if isinstance(cancelled_at, datetime) else str(cancelled_at)
+#                 st.write(f"❌ {p['package_name']} - ₹{p['price']} - {p.get('speed','-')} - "
+#                          f"{'Unlimited' if p['data_gb'] is None else str(p['data_gb']) + ' GB'} "
+#                          f"(Cancelled on {cancelled_at_str})")
+#         else:
+#             st.info("No previous plans found.")
+
+#     elif st.session_state.home_view == 'cart':
+#         st.markdown("### Your Shopping Cart")
+#         if st.session_state.get('cart', []):
+#             for idx, item in enumerate(list(st.session_state['cart'])):
+#                 st.markdown(f"**{item['name']}** - ₹{item['price']} - {item.get('speed','-')} - "
+#                             f"{'Unlimited' if item.get('data_gb') is None else str(item.get('data_gb')) + ' GB'}")
+#                 col1, col2 = st.columns(2)
+#                 with col1:
+#                     if st.button("Buy", key=f"buy_{idx}"):
+#                         subscribe_package(db, user['phone'], item)
+#                         st.success(f"✅ Bought {item['name']} subscription!")
+#                         st.session_state['cart'].remove(item)
+#                         st.rerun()
+#                 with col2:
+#                     if st.button("Cancel", key=f"remove_{idx}"):
+#                         st.session_state['cart'].remove(item)
+#                         st.warning(f"❌ Removed {item['name']} from cart.")
+#                         st.rerun()
+#         else:
+#             st.info("Your cart is empty.")
+
+#     elif st.session_state.home_view == 'usage':
+#         st.markdown("### Your Monthly Data Usage")
+#         usage_history = user.get("usage_history", [])
+#         if usage_history:
+#             df_usage = pd.DataFrame(usage_history)
+#             df_usage['timestamp'] = pd.to_datetime(df_usage['timestamp'])
+#             df_usage['month'] = df_usage['timestamp'].dt.to_period("M").astype(str)
+#             df_monthly = df_usage.groupby('month')['data_mb'].sum().reset_index()
+#         else:
+#             # Predefined usage data (dummy)
+#             df_monthly = pd.DataFrame({
+#                 "month": ["2025-01", "2025-02", "2025-03", "2025-04", "2025-05", "2025-06"],
+#                 "data_mb": [5000, 7200, 6600, 8000, 9500, 7000]
+#             })
+#         fig = px.bar(
+#             df_monthly, x='month', y='data_mb',
+#             labels={"month": "Month", "data_mb": "Data Used (MB)"},
+#             title="Monthly Data Usage"
+#         )
+#         st.plotly_chart(fig, use_container_width=True)
+
+#     elif st.session_state.home_view == 'history':
+#         st.markdown("### Your Action History")
+#         actions = user.get("actions", [])
+#         if actions:
+#             df_actions = pd.DataFrame(actions)
+#             # Ensure timestamp is a datetime object before formatting
+#             df_actions['timestamp'] = pd.to_datetime(df_actions['timestamp'])
+#             df_actions['timestamp'] = df_actions['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+#             st.dataframe(df_actions)
+#         else:
+#             st.info("No actions recorded yet.")
+# ------------------ USER HOME PAGE ------------------
+elif st.session_state.page == 'Home' and st.session_state.get('user'):
+    # This section manages the button-based navigation
+    if 'home_view' not in st.session_state:
+        st.session_state.home_view = 'browse_plans'  # Default view
+
+    user = db[USERS_COLL].find_one({"phone": st.session_state['user']['phone']})
+    subscriptions = user.get("subscriptions", [])
+
+    st.subheader("Your Broadband Dashboard")
+    cols = st.columns(6)
+    with cols[0]:
+        if st.button("🛍️ Browse Plans", use_container_width=True):
+            st.session_state.home_view = 'browse_plans'
+    with cols[1]:
+        if st.button("📡 Active Plan", use_container_width=True):
+            st.session_state.home_view = 'active_plan'
+    with cols[2]:
+        if st.button("📜 Previous Plans", use_container_width=True):
+            st.session_state.home_view = 'previous_plans'
+    with cols[3]:
+        if st.button("🛒 Your Cart", use_container_width=True):
+            st.session_state.home_view = 'cart'
+    with cols[4]:
+        if st.button("📊 Data Usage", use_container_width=True):
+            st.session_state.home_view = 'usage'
+    with cols[5]:
+        if st.button("📖 Your History", use_container_width=True):
+            st.session_state.home_view = 'history'
+
+    st.markdown("---")
+
+    # This section displays the content based on the button clicked
+    
+    if st.session_state.home_view == 'browse_plans':
+        # --- Suggested Packages ---
+        st.markdown("### 🌟 Suggested Plans for You")
+        for i, plan in enumerate(SUGGESTED_PACKAGES[:2]):
+            st.markdown(f"**{plan['name']}** - ₹{plan['price']} - {plan['speed']} - "
+                        f"{'Unlimited' if plan['data_gb'] is None else str(plan['data_gb']) + ' GB'}")
+            if plan['name'] in [p['name'] for p in st.session_state.get('cart', [])]:
+                st.info("✅ Added to Cart")
+            else:
+                if st.button("Add to Cart", key=f"suggested_cart_{i}"):
+                    st.session_state['cart'].append(plan)
+                    st.success(f"{plan['name']} added to cart!")
+                    st.rerun()
+
+        st.markdown("---")
+
+        # --- Admin Created Plans ---
+        st.markdown("### 📦 All Available Plans")
+        
+        # Get all plans from the database
+        plans = list(db[PLANS_COLL].find({}, {"_id": 0}))
+        
+        if plans:
+            # **NEW**: Determine the min and max price for the slider from available plans
+            prices = [plan.get('price', 0) for plan in plans]
+            min_price = min(prices)
+            max_price = max(prices)
+
+            # **NEW**: Create a slider to select the price range
+            if min_price < max_price:
+                selected_price_range = st.slider(
+                    "Select a price range (₹)",
+                    min_value=int(min_price),
+                    max_value=int(max_price),
+                    value=(int(min_price), int(max_price)) # Default to the full range
+                )
+                min_selected, max_selected = selected_price_range
+            else:
+                st.info(f"All available plans are priced at ₹{int(min_price)}.")
+                min_selected, max_selected = min_price, max_price
+
+            # **NEW**: Filter plans based on the selected price range
+            filtered_plans = [
+                plan for plan in plans if min_selected <= plan.get('price', 0) <= max_selected
+            ]
+
+            if filtered_plans:
+                for i, plan in enumerate(filtered_plans):
+                    st.markdown(f"**{plan['name']}** - ₹{plan['price']} - {plan.get('speed','-')} - "
+                                f"{'Unlimited' if plan.get('data_gb') is None else str(plan.get('data_gb')) + ' GB'}")
+                    if plan['name'] in [p['name'] for p in st.session_state.get('cart', [])]:
+                        st.info("✅ Added to Cart")
+                    else:
+                        if st.button("Add to Cart", key=f"admin_plan_cart_{plan['name']}_{i}"):
+                            st.session_state['cart'].append(plan)
+                            st.success(f"{plan['name']} added to cart!")
+                            st.rerun()
+            else:
+                # Show this message if the slider range excludes all plans
+                st.warning("No plans found in the selected price range.")
+        else:
+            # Show this message if there are no plans in the database at all
+            st.info("No admin plans available yet.")
+
+    elif st.session_state.home_view == 'active_plan':
+        st.markdown("### Your Current Active Plan")
+        # (The rest of the logic for other buttons remains the same...)
+        current_plans = [s for s in subscriptions if s.get("status") == "active"]
+        if current_plans:
+            cur = current_plans[-1]
+            sub_at = cur.get('subscribed_at')
+            sub_at_str = sub_at.strftime("%Y-%m-%d %H:%M:%S") if isinstance(sub_at, datetime) else str(sub_at)
+            st.success(f"**{cur['package_name']}** - ₹{cur['price']} - {cur.get('speed','-')} - "
+                       f"{'Unlimited' if cur['data_gb'] is None else str(cur['data_gb']) + ' GB'} "
+                       f"(Subscribed on {sub_at_str})")
+        else:
+            st.info("You do not have an active plan.")
+
+    elif st.session_state.home_view == 'previous_plans':
+        st.markdown("### Your Previous Plans")
+        prev_plans = [s for s in subscriptions if s.get("status") == "cancelled"]
+        if prev_plans:
+            for p in prev_plans[::-1]:
+                cancelled_at = p.get('cancelled_at')
+                cancelled_at_str = cancelled_at.strftime("%Y-%m-%d %H:%M:%S") if isinstance(cancelled_at, datetime) else str(cancelled_at)
+                st.write(f"❌ {p['package_name']} - ₹{p['price']} - {p.get('speed','-')} - "
+                         f"{'Unlimited' if p['data_gb'] is None else str(p['data_gb']) + ' GB'} "
+                         f"(Cancelled on {cancelled_at_str})")
+        else:
+            st.info("No previous plans found.")
+
+    elif st.session_state.home_view == 'cart':
+        st.markdown("### Your Shopping Cart")
+        if st.session_state.get('cart', []):
+            for idx, item in enumerate(list(st.session_state['cart'])):
+                st.markdown(f"**{item['name']}** - ₹{item['price']} - {item.get('speed','-')} - "
+                            f"{'Unlimited' if item.get('data_gb') is None else str(item.get('data_gb')) + ' GB'}")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("Buy", key=f"buy_{idx}"):
+                        subscribe_package(db, user['phone'], item)
+                        st.success(f"✅ Bought {item['name']} subscription!")
+                        st.session_state['cart'].remove(item)
+                        st.rerun()
+                with col2:
+                    if st.button("Cancel", key=f"remove_{idx}"):
+                        st.session_state['cart'].remove(item)
+                        st.warning(f"❌ Removed {item['name']} from cart.")
+                        st.rerun()
+        else:
+            st.info("Your cart is empty.")
+
+    elif st.session_state.home_view == 'usage':
+        st.markdown("### Your Monthly Data Usage")
+        usage_history = user.get("usage_history", [])
+        if usage_history:
+            df_usage = pd.DataFrame(usage_history)
+            df_usage['timestamp'] = pd.to_datetime(df_usage['timestamp'])
+            df_usage['month'] = df_usage['timestamp'].dt.to_period("M").astype(str)
+            df_monthly = df_usage.groupby('month')['data_mb'].sum().reset_index()
+        else:
+            df_monthly = pd.DataFrame({
+                "month": ["2025-01", "2025-02", "2025-03", "2025-04", "2025-05", "2025-06"],
+                "data_mb": [5000, 7200, 6600, 8000, 9500, 7000]
+            })
+        fig = px.bar(
+            df_monthly, x='month', y='data_mb',
+            labels={"month": "Month", "data_mb": "Data Used (MB)"},
+            title="Monthly Data Usage"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    elif st.session_state.home_view == 'history':
+        st.markdown("### Your Action History")
+        actions = user.get("actions", [])
+        if actions:
+            df_actions = pd.DataFrame(actions)
+            df_actions['timestamp'] = pd.to_datetime(df_actions['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+            st.dataframe(df_actions)
+        else:
+            st.info("No actions recorded yet.")
+elif st.session_state.page == 'Admin Panel' and st.session_state.get('user'):
+    st.header("📊 Admin Dashboard")
+    tabs = st.tabs(["Manage Plans", "User History", "Subscriptions", "Role Management", "Analytics Overview"])
+
+    # with tabs[0]:
+    #     st.subheader("Manage All Available Plans")
+    #     with st.form("add_plan_form", clear_on_submit=True):
+    #         st.markdown("### ➕ Add New Plan")
+    #         plan_name = st.text_input("Plan Name")
+    #         plan_price = st.number_input("Price (₹)", min_value=0.0)
+    #         plan_speed = st.text_input("Speed (e.g., 100 Mbps)")
+    #         plan_data = st.text_input("Data (GB, e.g., 50 or 'Unlimited')")
+    #         submitted = st.form_submit_button("Add Plan")
+    #         if submitted and plan_name:
+    #             data_gb = None
+    #             if plan_data.strip().lower() != 'unlimited':
+    #                 try:
+    #                     data_gb = int(plan_data)
+    #                 except ValueError:
+    #                     st.error("Please enter a valid number for Data (GB) or 'Unlimited'.")
+    #                     st.stop()
+                
+    #             new_plan = {"name": plan_name, "price": float(plan_price), "speed": plan_speed, "data_gb": data_gb}
+    #             db[PLANS_COLL].insert_one(new_plan)
+    #             st.success(f"Plan '{plan_name}' added successfully!")
+    #             st.rerun()
+
+    #     st.markdown("---")
+    #     st.markdown("### 📋 All Plans")
+    #     plans = list(db[PLANS_COLL].find({}))
+    #     if plans:
+    #         for plan in plans:
+    #             pid = str(plan.get("_id"))
+    #             with st.container(border=True):
+    #                 col1, col2, col3 = st.columns([4, 1, 1])
+    #                 with col1:
+    #                     st.write(f"**{plan.get('name')}**")
+    #                     st.write(f"Price: ₹{plan.get('price')} | Speed: {plan.get('speed','-')} | Data: {'Unlimited' if plan.get('data_gb') is None else str(plan.get('data_gb')) + ' GB'}")
+    #                 with col2:
+    #                     if st.button("✏️ Edit", key=f"edit_{pid}"):
+    #                         st.session_state['edit_plan_id'] = pid
+    #                         st.rerun()
+    #                 with col3:
+    #                     if st.button("🗑️ Delete", key=f"del_{pid}"):
+    #                         db[PLANS_COLL].delete_one({"_id": ObjectId(pid)})
+    #                         st.success(f"Deleted plan: {plan.get('name')}")
+    #                         st.rerun()
+
+    #         if 'edit_plan_id' in st.session_state:
+    #             pid_to_edit = st.session_state['edit_plan_id']
+    #             plan_to_edit = db[PLANS_COLL].find_one({"_id": ObjectId(pid_to_edit)})
+    #             st.markdown("---")
+    #             st.markdown("### ✏️ Update Plan")
+    #             with st.form(f"update_plan_form_{pid_to_edit}"):
+    #                 st.write(f"**Editing: {plan_to_edit.get('name')}**")
+    #                 new_name = st.text_input("Plan Name", value=plan_to_edit.get("name", ""))
+    #                 new_price = st.number_input("Price (₹)", value=float(plan_to_edit.get("price", 0.0)), min_value=0.0)
+    #                 new_speed = st.text_input("Speed", value=plan_to_edit.get("speed",""))
+    #                 existing_data = plan_to_edit.get("data_gb")
+    #                 new_data = st.text_input("Data (GB)", value="Unlimited" if existing_data is None else str(existing_data))
+    #                 update_submit = st.form_submit_button("Update Plan")
+    #                 if update_submit:
+    #                     data_gb_val = None
+    #                     if new_data.strip().lower() != 'unlimited':
+    #                         try:
+    #                             data_gb_val = int(new_data)
+    #                         except ValueError:
+    #                             st.error("Please enter a valid number for Data (GB) or 'Unlimited'.")
+    #                             st.stop()
+
+    #                     update_data = {"name": new_name, "price": float(new_price), "speed": new_speed, "data_gb": data_gb_val}
+    #                     db[PLANS_COLL].update_one({"_id": ObjectId(pid_to_edit)}, {"$set": update_data})
+    #                     st.success(f"Plan '{new_name}' updated successfully!")
+    #                     del st.session_state['edit_plan_id']
+    #                     st.rerun()
+    #     else:
+    #         st.info("No plans available yet.")
+    # ---------- Manage Plans (full CRUD) ----------
+    # with tabs[0]:
+    #     st.subheader("Manage All Available Plans")
+
+    #     # Add new plan via form
+    #     with st.form("add_plan_form", clear_on_submit=True):
+    #         st.markdown("### ➕ Add New Plan")
+    #         plan_name = st.text_input("Plan Name")
+    #         plan_price = st.number_input("Price (₹)", min_value=0.0, format="%.2f")
+    #         plan_speed = st.text_input("Speed (e.g., 100 Mbps)")
+    #         plan_data = st.text_input("Data (GB, e.g., 50 or 'Unlimited')")
+    #         submitted = st.form_submit_button("Add Plan")
+            
+    #         if submitted:
+    #             # NEW: Add validation to check if all fields are filled
+    #             if not all([plan_name, plan_speed, plan_data]):
+    #                 st.error("⚠️ Please fill all required fields.")
+    #             else:
+    #                 # This code runs only if all fields are filled
+    #                 data_gb = None
+    #                 if plan_data.strip().lower() != 'unlimited':
+    #                     try:
+    #                         data_gb = int(plan_data)
+    #                     except ValueError:
+    #                         st.error("Please enter a valid number for Data (GB) or 'Unlimited'.")
+    #                         st.stop()
+                    
+    #                 new_plan = {"name": plan_name, "price": float(plan_price), "speed": plan_speed, "data_gb": data_gb}
+    #                 db[PLANS_COLL].insert_one(new_plan)
+    #                 st.success(f"Plan '{plan_name}' added successfully!")
+    #                 st.rerun()
+
+    #     st.markdown("---")
+    #     st.markdown("### 📋 All Plans")
+        
+    #     # ... (The rest of the code for this tab remains the same) ...
+    #     plans = list(db[PLANS_COLL].find({}))
+    #     if plans:
+    #         for plan in plans:
+    #             pid = str(plan.get("_id"))
+    #             with st.container(border=True):
+    #                 col1, col2, col3 = st.columns([4, 1, 1])
+    #                 with col1:
+    #                     st.write(f"**{plan.get('name')}**")
+    #                     st.write(f"Price: ₹{plan.get('price')} | Speed: {plan.get('speed','-')} | Data: {'Unlimited' if plan.get('data_gb') is None else str(plan.get('data_gb')) + ' GB'}")
+    #                 with col2:
+    #                     if st.button("✏️ Edit", key=f"edit_{pid}"):
+    #                         st.session_state['edit_plan_id'] = pid
+    #                         st.rerun()
+    #                 with col3:
+    #                     if st.button("🗑️ Delete", key=f"del_{pid}"):
+    #                         db[PLANS_COLL].delete_one({"_id": ObjectId(pid)})
+    #                         st.success(f"Deleted plan: {plan.get('name')}")
+    #                         st.rerun()
+
+    #         if 'edit_plan_id' in st.session_state:
+    #             pid_to_edit = st.session_state['edit_plan_id']
+    #             plan_to_edit = db[PLANS_COLL].find_one({"_id": ObjectId(pid_to_edit)})
+    #             st.markdown("---")
+    #             st.markdown("### ✏️ Update Plan")
+    #             with st.form(f"update_plan_form_{pid_to_edit}"):
+    #                 st.write(f"**Editing: {plan_to_edit.get('name')}**")
+    #                 new_name = st.text_input("Plan Name", value=plan_to_edit.get("name", ""))
+    #                 new_price = st.number_input("Price (₹)", value=float(plan_to_edit.get("price", 0.0)), min_value=0.0, format="%.2f")
+    #                 new_speed = st.text_input("Speed", value=plan_to_edit.get("speed",""))
+    #                 existing_data = plan_to_edit.get("data_gb")
+    #                 new_data = st.text_input("Data (GB)", value="Unlimited" if existing_data is None else str(existing_data))
+    #                 update_submit = st.form_submit_button("Update Plan")
+    #                 if update_submit:
+    #                     data_gb_val = None
+    #                     if new_data.strip().lower() != 'unlimited':
+    #                         try:
+    #                             data_gb_val = int(new_data)
+    #                         except ValueError:
+    #                             st.error("Please enter a valid number for Data (GB) or 'Unlimited'.")
+    #                             st.stop()
+
+    #                     update_data = {"name": new_name, "price": float(new_price), "speed": new_speed, "data_gb": data_gb_val}
+    #                     db[PLANS_COLL].update_one({"_id": ObjectId(pid_to_edit)}, {"$set": update_data})
+    #                     st.success(f"Plan '{new_name}' updated successfully!")
+    #                     del st.session_state['edit_plan_id']
+    #                     st.rerun()
+    #     else:
+    #         st.info("No plans available yet.")
+    # ---------- Manage Plans (full CRUD) ----------
+    with tabs[0]:
+        st.subheader("Manage All Available Plans")
+
+        # --- Add New Plan Form ---
+        with st.form("add_plan_form", clear_on_submit=True):
+            st.markdown("### ➕ Add New Plan")
+            plan_name = st.text_input("Plan Name")
+            plan_price = st.number_input("Price (₹)", min_value=0.0, format="%.2f")
+            plan_speed = st.text_input("Speed (e.g., 100 Mbps)")
+            plan_data = st.text_input("Data (GB, e.g., 50 or 'Unlimited')")
+            # NEW: Add Plan Validity and Description fields
+            plan_validity = st.text_input("Plan Validity (e.g., 28 days, 3 months)")
+            plan_description = st.text_area("Plan Description")
+            
+            submitted = st.form_submit_button("Add Plan")
+            
+            if submitted:
+                # UPDATED: Add new fields to the validation check
+                if not all([plan_name, plan_speed, plan_data, plan_validity]):
+                    st.error("⚠️ Please fill all required fields (Description is optional).")
+                else:
+                    data_gb = None
+                    if plan_data.strip().lower() != 'unlimited':
+                        try:
+                            data_gb = int(plan_data)
+                        except ValueError:
+                            st.error("Please enter a valid number for Data (GB) or 'Unlimited'.")
+                            st.stop()
+                    
+                    # UPDATED: Add new fields to the database document
+                    new_plan = {
+                        "name": plan_name, 
+                        "price": float(plan_price), 
+                        "speed": plan_speed, 
+                        "data_gb": data_gb,
+                        "validity": plan_validity,
+                        "description": plan_description
+                    }
+                    db[PLANS_COLL].insert_one(new_plan)
+                    st.success(f"Plan '{plan_name}' added successfully!")
+                    st.rerun()
+
+        st.markdown("---")
+        st.markdown("### 📋 All Plans")
+        
+        # --- Display All Plans ---
+        plans = list(db[PLANS_COLL].find({}))
+        if plans:
+            for plan in plans:
+                pid = str(plan.get("_id"))
+                with st.container(border=True):
+                    col1, col2, col3 = st.columns([4, 1, 1])
+                    with col1:
+                        st.write(f"**{plan.get('name')}**")
+                        # UPDATED: Display the new fields
+                        st.write(
+                            f"Price: ₹{plan.get('price')} | "
+                            f"Speed: {plan.get('speed','-')} | "
+                            f"Data: {'Unlimited' if plan.get('data_gb') is None else str(plan.get('data_gb')) + ' GB'} | "
+                            f"Validity: {plan.get('validity', '-')}"
+                        )
+                        st.caption(f"Description: {plan.get('description', 'N/A')}")
+
+                    with col2:
+                        if st.button("✏️ Edit", key=f"edit_{pid}"):
+                            st.session_state['edit_plan_id'] = pid
+                            st.rerun()
+                    with col3:
+                        if st.button("🗑️ Delete", key=f"del_{pid}"):
+                            db[PLANS_COLL].delete_one({"_id": ObjectId(pid)})
+                            st.success(f"Deleted plan: {plan.get('name')}")
+                            st.rerun()
+
+            # --- Update Plan Form ---
+            if 'edit_plan_id' in st.session_state:
+                pid_to_edit = st.session_state['edit_plan_id']
+                plan_to_edit = db[PLANS_COLL].find_one({"_id": ObjectId(pid_to_edit)})
+                st.markdown("---")
+                st.markdown("### ✏️ Update Plan")
+                with st.form(f"update_plan_form_{pid_to_edit}"):
+                    st.write(f"**Editing: {plan_to_edit.get('name')}**")
+                    new_name = st.text_input("Plan Name", value=plan_to_edit.get("name", ""))
+                    new_price = st.number_input("Price (₹)", value=float(plan_to_edit.get("price", 0.0)), min_value=0.0, format="%.2f")
+                    new_speed = st.text_input("Speed", value=plan_to_edit.get("speed",""))
+                    existing_data = plan_to_edit.get("data_gb")
+                    new_data = st.text_input("Data (GB)", value="Unlimited" if existing_data is None else str(existing_data))
+                    # NEW: Add fields to the update form
+                    new_validity = st.text_input("Plan Validity", value=plan_to_edit.get("validity", ""))
+                    new_description = st.text_area("Plan Description", value=plan_to_edit.get("description", ""))
+
+                    update_submit = st.form_submit_button("Update Plan")
+                    if update_submit:
+                        data_gb_val = None
+                        if new_data.strip().lower() != 'unlimited':
+                            try:
+                                data_gb_val = int(new_data)
+                            except ValueError:
+                                st.error("Please enter a valid number for Data (GB) or 'Unlimited'.")
+                                st.stop()
+
+                        # UPDATED: Add new fields to the update data
+                        update_data = {
+                            "name": new_name, 
+                            "price": float(new_price), 
+                            "speed": new_speed, 
+                            "data_gb": data_gb_val,
+                            "validity": new_validity,
+                            "description": new_description
+                        }
+                        db[PLANS_COLL].update_one({"_id": ObjectId(pid_to_edit)}, {"$set": update_data})
+                        st.success(f"Plan '{new_name}' updated successfully!")
+                        del st.session_state['edit_plan_id']
+                        st.rerun()
+        else:
+            st.info("No plans available yet.")
+
+    with tabs[1]:
+        st.subheader("User Data Usage History")
+        users_cursor = db[USERS_COLL].find({"role": "user"})
+        rows = []
+        for u in users_cursor:
+            total_data_mb = sum([uh.get("data_mb", 0) for uh in u.get("usage_history", [])])
+            rows.append({"Full Name": u.get("full_name"), "Phone": u.get("phone"), "Total Data Used (MB)": total_data_mb, "Actions": len(u.get("actions", []))})
+        if rows:
+            st.dataframe(pd.DataFrame(rows))
+        else:
+            st.info("No user history found.")
+
+    with tabs[2]:
+        st.subheader("All User Subscriptions")
+        users_cursor = db[USERS_COLL].find({"role": "user"})
+        subs_list = []
+        for u in users_cursor:
+            for s in u.get("subscriptions", []):
+                subscribed_at = s.get("subscribed_at")
+                subs_list.append({
+                    "User": u.get("full_name"),
+                    "Phone": u.get("phone"),
+                    "Package": s.get("package_name"),
+                    "Status": s.get("status"),
+                    "Subscribed At": subscribed_at.strftime("%Y-%m-%d %H:%M:%S") if isinstance(subscribed_at, datetime) else str(subscribed_at)
+                })
+        if subs_list:
+            st.dataframe(pd.DataFrame(subs_list))
+        else:
+            st.info("No subscriptions found.")
+
+    with tabs[3]:
+        st.subheader("Role Management")
+        users_with_roles = list(db[USERS_COLL].find({}, {"full_name": 1, "phone": 1, "role": 1}))
+        
+        df_roles = pd.DataFrame(users_with_roles)
+        st.dataframe(df_roles, use_container_width=True)
+
+        st.markdown("---")
+        st.subheader("Promote User to Admin")
+        
+        normal_users = [u for u in users_with_roles if u.get("role") == "user"]
+        user_options = {f"{u['full_name']} ({u['phone']})": u['phone'] for u in normal_users} or {}
+        
+        if user_options:
+            selected_user_display = st.selectbox("Select User to Promote", list(user_options.keys()))
+            if st.button("Promote to Admin"):
+                user_phone_to_promote = user_options[selected_user_display]
+                db[USERS_COLL].update_one({"phone": user_phone_to_promote}, {"$set": {"role": "admin"}})
+                st.success(f"User {selected_user_display} promoted to Admin!")
+                st.rerun()
+        else:
+            st.info("No normal users available to promote.")
+
+    with tabs[4]:
+        st.subheader("Analytics Overview")
+        total_users = db[USERS_COLL].count_documents({"role": "user"})
+        total_admins = db[USERS_COLL].count_documents({"role": "admin"})
+        users_with_subs = db[USERS_COLL].count_documents({"subscriptions.0": {"$exists": True}})
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Users", total_users)
+        col2.metric("Total Admins", total_admins)
+        col3.metric("Users with Subscriptions", users_with_subs)
+
+        st.markdown("---")
+        st.subheader("💰 Profit Overview")
+        all_plans = list(db[PLANS_COLL].find({}, {"name": 1, "price": 1}))
+        price_map = {plan["name"]: plan["price"] for plan in all_plans}
+
+        pipeline = [{"$unwind": "$subscriptions"}, {"$group": {"_id": "$subscriptions.package_name", "count": {"$sum": 1}}}]
+        plan_sales_agg = list(db[USERS_COLL].aggregate(pipeline))
+        plan_sales = {item["_id"]: item["count"] for item in plan_sales_agg}
+        
+        profit_data = []
+        total_profit = 0
+        for plan_name, count in plan_sales.items():
+            price = price_map.get(plan_name, 0)
+            profit = price * count
+            total_profit += profit
+            profit_data.append({"Plan": plan_name, "Subscribers": count, "Price (₹)": price, "Profit (₹)": profit})
+
+        if profit_data:
+            df_profit = pd.DataFrame(profit_data)
+            st.dataframe(df_profit, use_container_width=True)
+            st.metric("💵 Total Profit", f"₹{int(total_profit):,}")
+            fig_profit = px.bar(df_profit, x="Plan", y="Profit (₹)", color="Plan", title="Profit by Subscription Plan")
+            st.plotly_chart(fig_profit, use_container_width=True)
+        else:
+            st.info("No subscription profit data available yet.")
+
+        # ... (rest of analytics code is fine) ...
+# in this code i want to some more changes to my project can you please add this changes and give to me i want to see the changes to my project. i am getting the error in this code so please correct the code and give to me
